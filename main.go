@@ -116,40 +116,33 @@ func fail(fstr string, v ...interface{}) {
 func statsForContainers(ctx context.Context, out io.Writer, client *docker.Client, containerIDs ...string) {
 	statsChan := make(chan *docker.Stats)
 
+	// stream stats from all containers until they stop.
 	for x := range containerIDs {
 		idx := x
 		id := containerIDs[x]
 
-		// Super aggressively fetch stats from Docker.
+		contStats := make(chan *docker.Stats)
+
+		go client.Stats(docker.StatsOptions{
+			Context: ctx,
+			ID:      id,
+			Stats:   contStats,
+		})
+		// combine stats logging for individual containers
 		go func() {
-			contStats := make(chan *docker.Stats)
-			subscribeAgain := make(chan bool, 1)
-			subscribeAgain <- true
 
 			log.Printf("listing for stats for container %q", id)
 			for {
 				select {
 				case <-ctx.Done():
 					return
-				case stat := <-contStats:
-					if stat == nil {
-						continue
+				case stat, ok := <-contStats:
+					if !ok {
+						log.Printf("Container %q id %q is no longer streaming", idx, id)
+						return
 					}
 					log.Printf("Received stat for container %q id %q", idx, id)
 					statsChan <- stat
-					subscribeAgain <- true
-				case <-subscribeAgain:
-					log.Printf("listening for more stats")
-					contStats = make(chan *docker.Stats)
-
-					go func() {
-						client.Stats(docker.StatsOptions{
-							Context: ctx,
-							ID:      id,
-							Stats:   contStats,
-						})
-						<-subscribeAgain
-					}()
 				}
 			}
 		}()
