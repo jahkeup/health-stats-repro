@@ -19,10 +19,13 @@ FROM busybox@sha256:5551dbdfc48d66734d0f01cafee0952cb6e8eeecd1e2492240bf2fd9640c
 HEALTHCHECK --interval=1s --timeout=1s --retries=3 CMD echo hello
 CMD ["sh", "-c", "sleep 30m"]
 `
-	imageName = "docker-poke:healthchecks"
+	imageName            = "docker-poke:healthchecks"
+	callTimeoutSecs uint = 10
+	runDuration          = time.Second * 10
 )
 
 func buildImageOptions(name string) docker.BuildImageOptions {
+	log.Println("Building docker container for test")
 	t := time.Now()
 	inputbuf := bytes.NewBuffer(nil)
 	tr := tar.NewWriter(inputbuf)
@@ -35,7 +38,6 @@ func buildImageOptions(name string) docker.BuildImageOptions {
 		InputStream:  inputbuf,
 		OutputStream: os.Stdout,
 	}
-
 	return opts
 }
 
@@ -51,25 +53,13 @@ func createContainer(client *docker.Client) (*docker.Container, error) {
 
 func main() {
 	// Setup some log files
-	t := time.Now()
-	stamp := t.Format(time.RFC3339)
-	statsoutName := fmt.Sprintf("statsout-%s", stamp)
-	eventsoutName := fmt.Sprintf("eventsout-%s", stamp)
-
-	log.Printf("logging events to %q", eventsoutName)
-	log.Printf("logging stats to %q", statsoutName)
-
-	statsout, err := os.OpenFile(statsoutName, os.O_CREATE|os.O_WRONLY, 0640)
-	failOnError(err)
-	eventsout, err := os.OpenFile(eventsoutName, os.O_CREATE|os.O_WRONLY, 0640)
-	failOnError(err)
+	statsout, eventsout := logFiles()
 
 	cl, err := docker.NewClientFromEnv()
 	failOnError(err)
 
 	err = cl.BuildImage(buildImageOptions(imageName))
 	failOnError(err)
-	defer cl.RemoveImage(imageName)
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -90,35 +80,68 @@ func main() {
 	// Start those containers
 	err = cl.StartContainer(cont1.ID, nil)
 	failOnError(err)
-	defer cl.StopContainer(cont1.ID, 0)
 
 	err = cl.StartContainer(cont2.ID, nil)
-	failOnError(err)
-	defer cl.StopContainer(cont2.ID, 0)
+	if err != nil {
+		// stop the other container and then exit.
+		stopAndCheckContainer(cl, cont1)
+		failOnError(err)
+	}
 
 	// And listen to their stats output.
-	go statsForContainers(ctx, statsout, cl, cont1.ID, cont2.ID)
+	go logStatsForContainers(ctx, statsout, cl, cont1.ID, cont2.ID)
 
-	time.Sleep(10 * time.Second)
-}
+	// Run the containers for some time.
+	log.Printf("Waiting for %s", runDuration)
+	time.Sleep(runDuration)
 
-func failOnError(err error) {
+	// Shut it down.
+	cancel()
+
+	// Check the containers that were run.
+	success := true
+	err = stopAndCheckContainer(cl, cont1)
 	if err != nil {
-		fail("%s", err)
+		success = false
+	}
+	err = stopAndCheckContainer(cl, cont2)
+	if err != nil {
+		success = false
+	}
+
+	if !success {
+		os.Exit(2)
 	}
 }
 
-func fail(fstr string, v ...interface{}) {
-	log.Printf(fstr, v...)
-	os.Exit(1)
+func stopAndCheckContainer(client *docker.Client, cont *docker.Container) error {
+	err := client.StopContainer(cont.ID, callTimeoutSecs)
+	if err != nil {
+		log.Printf("Could not stop container %q", cont.ID)
+		log.Printf("Will try to inspect container %q", cont.ID)
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), time.Duration(callTimeoutSecs)*time.Second)
+
+	insp, err := client.InspectContainerWithContext(cont.ID, ctx)
+	cancel()
+	if err != nil {
+		return err
+	}
+	log.Printf("Successfully inspected container %q", insp.ID)
+
+	log.Printf("Removing container %q", insp.ID)
+	err = client.RemoveContainer(docker.RemoveContainerOptions{
+		ID: cont.ID,
+	})
+	return err
 }
 
-func statsForContainers(ctx context.Context, out io.Writer, client *docker.Client, containerIDs ...string) {
+func logStatsForContainers(ctx context.Context, out io.Writer, client *docker.Client, containerIDs ...string) {
 	statsChan := make(chan *docker.Stats)
 
 	// stream stats from all containers until they stop.
 	for x := range containerIDs {
-		idx := x
 		id := containerIDs[x]
 
 		contStats := make(chan *docker.Stats)
@@ -138,10 +161,10 @@ func statsForContainers(ctx context.Context, out io.Writer, client *docker.Clien
 					return
 				case stat, ok := <-contStats:
 					if !ok {
-						log.Printf("Container %q id %q is no longer streaming", idx, id)
+						log.Printf("Container %q is no longer streaming", id)
 						return
 					}
-					log.Printf("Received stat for container %q id %q", idx, id)
+					log.Printf("Received stat for container %q", id)
 					statsChan <- stat
 				}
 			}
@@ -170,5 +193,29 @@ func logEvents(ctx context.Context, out io.Writer, events <-chan *docker.APIEven
 		case event := <-events:
 			fmt.Fprintf(out, "%#v", event)
 		}
+	}
+}
+
+func logFiles() (io.WriteCloser, io.WriteCloser) {
+	t := time.Now()
+	stamp := t.Format(time.RFC3339)
+	statsoutName := fmt.Sprintf("statsout-%s", stamp)
+	eventsoutName := fmt.Sprintf("eventsout-%s", stamp)
+
+	log.Printf("logging events to %q", eventsoutName)
+	log.Printf("logging stats to %q", statsoutName)
+
+	statsout, err := os.OpenFile(statsoutName, os.O_CREATE|os.O_WRONLY, 0640)
+	failOnError(err)
+	eventsout, err := os.OpenFile(eventsoutName, os.O_CREATE|os.O_WRONLY, 0640)
+	failOnError(err)
+
+	return statsout, eventsout
+}
+
+func failOnError(err error) {
+	if err != nil {
+		log.Printf("%s", err)
+		os.Exit(1)
 	}
 }
