@@ -1,3 +1,12 @@
+// @jahkeup | jakeev@amazon.com
+//
+// run the resulting build with:
+//
+// yes  | head -n 20 | xargs -L1 -P0 ./docker-poke
+//
+// It may hang despite there being timeouts on some of the api calls
+// being made to the daemon.
+//
 package main
 
 import (
@@ -126,6 +135,7 @@ func stopAndCheckContainer(client *docker.Client, cont *docker.Container) error 
 	insp, err := client.InspectContainerWithContext(cont.ID, ctx)
 	cancel()
 	if err != nil {
+		log.Printf("Error inspecting container: %s", err)
 		return err
 	}
 	log.Printf("Successfully inspected container %q", insp.ID)
