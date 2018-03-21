@@ -1,8 +1,6 @@
 # Repro Runner
 
-This is a repro case for a Docker issue (to be filed) where a
-Container with HEALTHCHECKs and Stats being collected may fall into a
-state where it cannot be interacted with with any API calls.
+This is a repro case for a [Docker/Moby issue](https://github.com/moby/moby/issues/36661) where a Container with HEALTHCHECKs may fall into a state where it cannot be interacted with with any API calls.
 
 ## Running
 
