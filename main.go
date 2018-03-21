@@ -57,8 +57,6 @@ func init() {
 
 func main() {
 	// Setup
-	statsout := logFile("statsout")
-	defer statsout.Close()
 
 	cl, err := docker.NewClientFromEnv()
 	failOnError(err)
@@ -72,6 +70,7 @@ func main() {
 	// are listened on for stats, the api calls to the affected
 	// containers hang.
 	//
+	// EDIT 2018-03-21: Stats streaming isn't necessary for the bug to manifest.
 
 	// Create some containers
 	cont1, err := createContainer(cl)
@@ -96,16 +95,9 @@ func main() {
 		cont2,
 	}
 
-	ctx, cancel := context.WithCancel(context.Background())
-	// And listen to their stats output.
-	go logStatsForContainers(ctx, statsout, cl, conts...)
-
 	// Run the containers for some time.
 	log.Printf("Waiting for %s", runDuration)
 	time.Sleep(runDuration)
-
-	// Shut down it down.
-	cancel()
 
 	// Check the containers that were run.
 	affected := []*docker.Container{}
