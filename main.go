@@ -2,7 +2,7 @@
 //
 // run the resulting build with:
 //
-// yes  | head -n 20 | xargs -L1 -P0 ./docker-poke
+// head -c 20 /dev/zero | xargs -0 -L1 -P0 ./health-stats-repro
 //
 // It may hang despite there being timeouts on some of the api calls
 // being made to the daemon.
@@ -29,9 +29,17 @@ HEALTHCHECK --interval=1s --timeout=1s --retries=3 CMD echo hello
 CMD ["sh", "-c", "sleep 30m"]
 `
 	imageName            = "docker-poke:healthchecks"
-	callTimeoutSecs uint = 10
+	callTimeoutSecs uint = 15
 	runDuration          = time.Second * 10
 )
+
+var (
+	progT time.Time
+)
+
+func init() {
+	progT = time.Now()
+}
 
 func buildImageOptions(name string) docker.BuildImageOptions {
 	log.Println("Building docker container for test")
@@ -61,8 +69,9 @@ func createContainer(client *docker.Client) (*docker.Container, error) {
 }
 
 func main() {
-	// Setup some log files
-	statsout, eventsout := logFiles()
+	// Setup
+	statsout := logFile("statsout")
+	defer statsout.Close()
 
 	cl, err := docker.NewClientFromEnv()
 	failOnError(err)
@@ -70,14 +79,12 @@ func main() {
 	err = cl.BuildImage(buildImageOptions(imageName))
 	failOnError(err)
 
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-	eventChan := make(chan *docker.APIEvents)
-	err = cl.AddEventListener(eventChan)
-	failOnError(err)
-
-	// Watch all events coming out of the daemon
-	go logEvents(ctx, eventsout, eventChan)
+	// Repro case:
+	//
+	// It appears that when containers that run with healthchecks and
+	// are listened on for stats, the api calls to the affected
+	// containers hang.
+	//
 
 	// Create some containers
 	cont1, err := createContainer(cl)
@@ -86,7 +93,7 @@ func main() {
 	cont2, err := createContainer(cl)
 	failOnError(err)
 
-	// Start those containers
+	// Start some containers
 	err = cl.StartContainer(cont1.ID, nil)
 	failOnError(err)
 
@@ -97,62 +104,80 @@ func main() {
 		failOnError(err)
 	}
 
+	conts := []*docker.Container{
+		cont1,
+		cont2,
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
 	// And listen to their stats output.
-	go logStatsForContainers(ctx, statsout, cl, cont1.ID, cont2.ID)
+	go logStatsForContainers(ctx, statsout, cl, conts...)
 
 	// Run the containers for some time.
 	log.Printf("Waiting for %s", runDuration)
 	time.Sleep(runDuration)
 
-	// Shut it down.
+	// Shut down it down.
 	cancel()
 
 	// Check the containers that were run.
-	success := true
-	err = stopAndCheckContainer(cl, cont1)
-	if err != nil {
-		success = false
-	}
-	err = stopAndCheckContainer(cl, cont2)
-	if err != nil {
-		success = false
+	affected := []*docker.Container{}
+	for _, cont := range conts {
+		err = stopAndCheckContainer(cl, cont)
+		if err != nil {
+			affected = append(affected, cont)
+		}
 	}
 
-	if !success {
+	if len(affected) != 0 {
+		log.Printf("Run affected %d container(s):", len(affected))
+		for _, c := range affected {
+			fmt.Printf("# docker inspect %s\n", c.ID)
+		}
 		os.Exit(2)
 	}
 }
 
 func stopAndCheckContainer(client *docker.Client, cont *docker.Container) error {
-	err := client.StopContainer(cont.ID, callTimeoutSecs)
+	// Try to stop the container
+	ctx, _ := context.WithTimeout(context.Background(), time.Duration(callTimeoutSecs)*time.Second)
+
+	err := client.KillContainer(docker.KillContainerOptions{
+		Context: ctx,
+		ID:      cont.ID,
+	})
 	if err != nil {
 		log.Printf("Could not stop container %q", cont.ID)
 		log.Printf("Will try to inspect container %q", cont.ID)
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), time.Duration(callTimeoutSecs)*time.Second)
-
+	// Check it out either way.
+	ctx, _ = context.WithTimeout(context.Background(), time.Duration(callTimeoutSecs)*time.Second)
 	insp, err := client.InspectContainerWithContext(cont.ID, ctx)
-	cancel()
 	if err != nil {
 		log.Printf("Error inspecting container: %s", err)
 		return err
 	}
 	log.Printf("Successfully inspected container %q", insp.ID)
 
-	log.Printf("Removing container %q", insp.ID)
+	log.Printf("Trying to remove container %q", insp.ID)
 	err = client.RemoveContainer(docker.RemoveContainerOptions{
 		ID: cont.ID,
 	})
+	if err != nil {
+		log.Printf("Could not remove container %q", insp.ID)
+		return err
+	}
+	log.Printf("Removed container %q", insp.ID)
 	return err
 }
 
-func logStatsForContainers(ctx context.Context, out io.Writer, client *docker.Client, containerIDs ...string) {
+func logStatsForContainers(ctx context.Context, out io.Writer, client *docker.Client, containers ...*docker.Container) {
 	statsChan := make(chan *docker.Stats)
 
 	// stream stats from all containers until they stop.
-	for x := range containerIDs {
-		id := containerIDs[x]
+	for x := range containers {
+		id := containers[x].ID
 
 		contStats := make(chan *docker.Stats)
 
@@ -164,7 +189,7 @@ func logStatsForContainers(ctx context.Context, out io.Writer, client *docker.Cl
 		// combine stats logging for individual containers
 		go func() {
 
-			log.Printf("listing for stats for container %q", id)
+			log.Printf("Listening for stats for container %q", id)
 			for {
 				select {
 				case <-ctx.Done():
@@ -206,21 +231,17 @@ func logEvents(ctx context.Context, out io.Writer, events <-chan *docker.APIEven
 	}
 }
 
-func logFiles() (io.WriteCloser, io.WriteCloser) {
-	t := time.Now()
-	stamp := t.Format(time.RFC3339)
-	statsoutName := fmt.Sprintf("statsout-%s", stamp)
-	eventsoutName := fmt.Sprintf("eventsout-%s", stamp)
+func logFile(name string) io.WriteCloser {
+	stamp := progT.Format(time.RFC3339)
 
-	log.Printf("logging events to %q", eventsoutName)
-	log.Printf("logging stats to %q", statsoutName)
+	statsoutName := fmt.Sprintf("%s-%s", name, stamp)
 
-	statsout, err := os.OpenFile(statsoutName, os.O_CREATE|os.O_WRONLY, 0640)
-	failOnError(err)
-	eventsout, err := os.OpenFile(eventsoutName, os.O_CREATE|os.O_WRONLY, 0640)
+	log.Printf("logging %q to %q", name, statsoutName)
+
+	outfile, err := os.OpenFile(statsoutName, os.O_CREATE|os.O_WRONLY, 0640)
 	failOnError(err)
 
-	return statsout, eventsout
+	return outfile
 }
 
 func failOnError(err error) {
