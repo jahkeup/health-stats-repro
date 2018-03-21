@@ -22,21 +22,21 @@ make run N=20
 
 ### Ubuntu
 
-| Package                 | Result |
-|-------------------------|--------|
-| 17.09.1~ce-0~ubuntu     | pass   |
-| 17.10.0~ce-0~ubuntu     | pass   |
-| 17.11.0~ce-0~ubuntu     | pass   |
-| 17.12.0~ce~rc1-0~ubuntu | fail   |
-| 17.12.0~ce-0~ubuntu     | fail   |
-| 17.12.1~ce-0~ubuntu     | fail   |
-| 18.01.0~ce-0~ubuntu     | fail   |
-| 18.02.0~ce-0~ubuntu     | fail   |
-| 18.03.0~ce~rc4-0~ubuntu | fail   |
+| Package                   | Result |
+|---------------------------|--------|
+| `17.09.1~ce-0~ubuntu`     | pass   |
+| `17.10.0~ce-0~ubuntu`     | pass   |
+| `17.11.0~ce-0~ubuntu`     | pass   |
+| `17.12.0~ce~rc1-0~ubuntu` | fail   |
+| `17.12.0~ce-0~ubuntu`     | fail   |
+| `17.12.1~ce-0~ubuntu`     | fail   |
+| `18.01.0~ce-0~ubuntu`     | fail   |
+| `18.02.0~ce-0~ubuntu`     | fail   |
+| `18.03.0~ce~rc4-0~ubuntu` | fail   |
 
 ## Amazon Linux
 
-| Package    | Result |
-|------------|--------|
-| 17.12.0-ce | fail   |
-| 17.09.1-ce | pass   |
+| Package      | Result |
+|--------------|--------|
+| `17.12.0-ce` | fail   |
+| `17.09.1-ce` | pass   |
