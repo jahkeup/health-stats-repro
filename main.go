@@ -27,6 +27,7 @@ import (
 	"archive/tar"
 	"bytes"
 	"context"
+	"flag"
 	"fmt"
 	"io"
 	"log"
@@ -37,22 +38,32 @@ import (
 )
 
 const (
-	dockerfile = `
+	healthcheckDockerfile = `
 FROM busybox@sha256:5551dbdfc48d66734d0f01cafee0952cb6e8eeecd1e2492240bf2fd9640c2279
 HEALTHCHECK --interval=1s --timeout=1s --retries=3 CMD echo hello
 CMD ["sh", "-c", "sleep %s"]
 `
-	imageName                 = "docker-poke:healthchecks"
-	imageSleepTimeString      = "2m"
-	callTimeoutSecs      uint = 15
-	runDuration               = time.Second * 10
+	noHealthcheckdockerfile = `
+FROM busybox@sha256:5551dbdfc48d66734d0f01cafee0952cb6e8eeecd1e2492240bf2fd9640c2279
+#HEALTHCHECK --interval=1s --timeout=1s --retries=3 CMD echo hello
+CMD ["sh", "-c", "sleep %s"]
+`
 
-	configStopContainer   = false
-	configRemoveContainer = false
+	callTimeoutSecs uint = 15
+	runDuration          = time.Second * 10
 )
 
 var (
 	progT time.Time
+
+	useHealthchecks  bool
+	healthCheckSleep string
+	stopContainers   bool
+	removeContainers bool
+
+	imageDockerfile      string
+	imageSleepTimeString string
+	imageName            string
 )
 
 func init() {
@@ -60,12 +71,28 @@ func init() {
 }
 
 func main() {
+	flag.BoolVar(&useHealthchecks, "healthchecks", true, "Use HEALTHCHECK in container")
+	flag.BoolVar(&stopContainers, "stop-containers", true, "Stop run containers")
+	flag.BoolVar(&removeContainers, "remove-containers", true, "Remove run containers")
+	flag.StringVar(&imageSleepTimeString, "healthcheck-sleep-time", "2m", "Set `$ sleep <duration>` in healthcheck")
+	flag.Parse()
+
+	if useHealthchecks {
+		imageName = "docker-poke:healthchecks"
+		log.Println("Using Dockerfile with healthchecks")
+		imageDockerfile = healthcheckDockerfile
+	} else {
+		imageName = "docker-poke:no-healthchecks"
+		log.Println("Using Dockerfile WITHOUT healtchecks")
+		imageDockerfile = noHealthcheckdockerfile
+	}
+
 	// Setup
 	cl, err := docker.NewClientFromEnv()
 	failOnError(err)
 
-	log.Printf("| Config: stop container:\t%t", configRemoveContainer)
-	log.Printf("| Config: remove container:\t%t", configRemoveContainer)
+	log.Printf("Config stop container:\t%t", stopContainers)
+	log.Printf("Config remove container:\t%t", removeContainers)
 
 	err = cl.BuildImage(buildImageOptions(imageName))
 	failOnError(err)
@@ -124,7 +151,7 @@ func main() {
 }
 
 func stopAndCheckContainer(client *docker.Client, cont *docker.Container) error {
-	if configStopContainer {
+	if stopContainers {
 		// Try to stop the container
 		ctx, _ := context.WithTimeout(context.Background(), time.Duration(callTimeoutSecs)*time.Second)
 
@@ -147,7 +174,7 @@ func stopAndCheckContainer(client *docker.Client, cont *docker.Container) error 
 	}
 	log.Printf("Successfully inspected container %q", insp.ID)
 
-	if configRemoveContainer {
+	if removeContainers {
 		log.Printf("Trying to remove container %q", insp.ID)
 		err = client.RemoveContainer(docker.RemoveContainerOptions{
 			ID: cont.ID,
@@ -216,7 +243,7 @@ func buildImageOptions(name string) docker.BuildImageOptions {
 	tr := tar.NewWriter(inputbuf)
 	data := bytes.NewBuffer(nil)
 
-	fmt.Fprintf(data, dockerfile, imageSleepTimeString)
+	fmt.Fprintf(data, imageDockerfile, imageSleepTimeString)
 
 	tr.WriteHeader(&tar.Header{Name: "Dockerfile", Size: int64(len(data.Bytes())), ModTime: t, AccessTime: t, ChangeTime: t})
 	tr.Write(data.Bytes())
