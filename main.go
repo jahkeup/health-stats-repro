@@ -40,11 +40,15 @@ const (
 	dockerfile = `
 FROM busybox@sha256:5551dbdfc48d66734d0f01cafee0952cb6e8eeecd1e2492240bf2fd9640c2279
 HEALTHCHECK --interval=1s --timeout=1s --retries=3 CMD echo hello
-CMD ["sh", "-c", "sleep 30m"]
+CMD ["sh", "-c", "sleep %s"]
 `
-	imageName            = "docker-poke:healthchecks"
-	callTimeoutSecs uint = 15
-	runDuration          = time.Second * 10
+	imageName                 = "docker-poke:healthchecks"
+	imageSleepTimeString      = "2m"
+	callTimeoutSecs      uint = 15
+	runDuration               = time.Second * 10
+
+	configStopContainer   = false
+	configRemoveContainer = false
 )
 
 var (
@@ -57,9 +61,11 @@ func init() {
 
 func main() {
 	// Setup
-
 	cl, err := docker.NewClientFromEnv()
 	failOnError(err)
+
+	log.Printf("| Config: stop container:\t%t", configRemoveContainer)
+	log.Printf("| Config: remove container:\t%t", configRemoveContainer)
 
 	err = cl.BuildImage(buildImageOptions(imageName))
 	failOnError(err)
@@ -118,20 +124,22 @@ func main() {
 }
 
 func stopAndCheckContainer(client *docker.Client, cont *docker.Container) error {
-	// Try to stop the container
-	ctx, _ := context.WithTimeout(context.Background(), time.Duration(callTimeoutSecs)*time.Second)
+	if configStopContainer {
+		// Try to stop the container
+		ctx, _ := context.WithTimeout(context.Background(), time.Duration(callTimeoutSecs)*time.Second)
 
-	err := client.KillContainer(docker.KillContainerOptions{
-		Context: ctx,
-		ID:      cont.ID,
-	})
-	if err != nil {
-		log.Printf("Could not stop container %q", cont.ID)
-		log.Printf("Will try to inspect container %q", cont.ID)
+		err := client.KillContainer(docker.KillContainerOptions{
+			Context: ctx,
+			ID:      cont.ID,
+		})
+		if err != nil {
+			log.Printf("Could not stop container %q", cont.ID)
+			log.Printf("Will try to inspect container %q", cont.ID)
+		}
 	}
 
-	// Check it out either way.
-	ctx, _ = context.WithTimeout(context.Background(), time.Duration(callTimeoutSecs)*time.Second)
+	// Inspect run containers
+	ctx, _ := context.WithTimeout(context.Background(), time.Duration(callTimeoutSecs)*time.Second)
 	insp, err := client.InspectContainerWithContext(cont.ID, ctx)
 	if err != nil {
 		log.Printf("Error inspecting container: %s", err)
@@ -139,15 +147,17 @@ func stopAndCheckContainer(client *docker.Client, cont *docker.Container) error 
 	}
 	log.Printf("Successfully inspected container %q", insp.ID)
 
-	log.Printf("Trying to remove container %q", insp.ID)
-	err = client.RemoveContainer(docker.RemoveContainerOptions{
-		ID: cont.ID,
-	})
-	if err != nil {
-		log.Printf("Could not remove container %q", insp.ID)
-		return err
+	if configRemoveContainer {
+		log.Printf("Trying to remove container %q", insp.ID)
+		err = client.RemoveContainer(docker.RemoveContainerOptions{
+			ID: cont.ID,
+		})
+		if err != nil {
+			log.Printf("Could not remove container %q", insp.ID)
+			return err
+		}
+		log.Printf("Removed container %q", insp.ID)
 	}
-	log.Printf("Removed container %q", insp.ID)
 	return err
 }
 
@@ -204,9 +214,12 @@ func buildImageOptions(name string) docker.BuildImageOptions {
 	t := time.Now()
 	inputbuf := bytes.NewBuffer(nil)
 	tr := tar.NewWriter(inputbuf)
-	data := []byte(dockerfile)
-	tr.WriteHeader(&tar.Header{Name: "Dockerfile", Size: int64(len(data)), ModTime: t, AccessTime: t, ChangeTime: t})
-	tr.Write(data)
+	data := bytes.NewBuffer(nil)
+
+	fmt.Fprintf(data, dockerfile, imageSleepTimeString)
+
+	tr.WriteHeader(&tar.Header{Name: "Dockerfile", Size: int64(len(data.Bytes())), ModTime: t, AccessTime: t, ChangeTime: t})
+	tr.Write(data.Bytes())
 	tr.Close()
 	opts := docker.BuildImageOptions{
 		Name:         name,
